@@ -1,0 +1,19 @@
+{
+  "query": "test",
+  "retrieval_model": {
+    "search_method": "keyword_search",
+    "reranking_enable": false,
+    "reranking_mode": null,
+    "reranking_model": {
+      "reranking_provider_name": "",
+      "reranking_model_name": ""
+    },
+    "weights": {
+      "vector_weight": 0,
+      "keyword_weight": 1
+    },
+    "top_k": 2,
+    "score_threshold_enabled": false,
+    "score_threshold": 0
+  }
+}
