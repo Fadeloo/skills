@@ -5,20 +5,7 @@
 {
   "query": "test",
   "retrieval_model": {
-    "search_method": "keyword_search",
-    "reranking_enable": false,
-    "reranking_mode": null,
-    "reranking_model": {
-      "reranking_provider_name": "",
-      "reranking_model_name": ""
-    },
-    "weights": {
-      "vector_weight": 0,
-      "keyword_weight": 1
-    },
-    "top_k": 2,
-    "score_threshold_enabled": false,
-    "score_threshold": 0
+    "top_k": 8
   }
 }
 ```
@@ -26,14 +13,7 @@
 ## Field notes
 - `query` (required): user query string.
 - `retrieval_model` (optional): per-request retrieval settings.
-- `search_method`: retrieval method (example uses `keyword_search`).
-- `reranking_enable`: enable or disable reranking.
-- `reranking_mode`: reranking mode or null.
-- `reranking_model`: object with provider/model names when reranking is enabled.
-- `weights.vector_weight/keyword_weight`: weighting values for vector/keyword retrieval.
-- `top_k`: number of chunks to return.
-- `score_threshold_enabled`: gate results by score threshold.
-- `score_threshold`: numeric threshold value when enabled.
+- `retrieval_model.top_k`: optional; number of chunks to return. If no results, increase `top_k` moderately and retry.
 
 ## Output
 ```json

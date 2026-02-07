@@ -6,7 +6,7 @@ description: Dify dataset retrieve API for knowledge base chunk search/testing. 
 # Dify Knowledge Base Search
 
 ## Required parameters
-- `data`: JSON payload containing the `query` string (optional `retrieval_model`).
+- `data`: JSON payload containing the `query` string (optional `retrieval_model.top_k`).
 - Read from ENV:
   - `DIFY_API_BASE_URL`: base API URL; include `/v1` in the value.
   - `DIFY_DATASET_ID`: knowledge base (dataset) ID.
@@ -15,7 +15,7 @@ description: Dify dataset retrieve API for knowledge base chunk search/testing. 
 ## Quick start
 - Endpoint: `${DIFY_API_BASE_URL}/datasets/${DIFY_DATASET_ID}/retrieve`
 - Header: `Authorization: Bearer <DIFY_API_KEY>`
-- Body: JSON with `query` (optional `retrieval_model`); `assets/example-request.json` shows the format.
+- Body: JSON with `query` (optional `retrieval_model.top_k`); `assets/example-request.json` shows the format.
 
 - Example call:
   ```bash
@@ -26,8 +26,8 @@ description: Dify dataset retrieve API for knowledge base chunk search/testing. 
   ```
 
 ## Request & output
-- POST `{ "query": string, "retrieval_model"?: object }`.
-- `retrieval_model` fields: `search_method`, `reranking_enable`, `reranking_mode`, `reranking_model`, `weights`, `top_k`, `score_threshold_enabled`, `score_threshold` (see `references/request-response.md`).
+- POST `{ "query": string, "retrieval_model"?: { "top_k": number } }`.
+- `retrieval_model.top_k`: optional; number of chunks to return. If no results, increase `top_k` moderately and retry (see `references/request-response.md`).
 - Responses: 200 with `{ query, records: [...] }`.
 
 ## References
