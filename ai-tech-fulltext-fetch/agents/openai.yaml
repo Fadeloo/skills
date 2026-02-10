@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Tech Fulltext Fetch"
+  short_description: "Fetch full text from RSS entries"
+  default_prompt: "Use $ai-tech-fulltext-fetch to read URLs from SQLite RSS entries and persist extracted full article text with retry-safe status tracking."
