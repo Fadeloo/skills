@@ -3,7 +3,7 @@
 ## Full-Text-First Fallback
 Use this strict selection order for each item:
 
-1. Try extracting full article text from `link`.
+1. Try extracting full article text from `link` with `web_fetch` first.
 2. If full text is missing, blocked, or shorter than `min_fulltext_chars`, try RSS content fields:
   - `content:encoded`
   - `content`
@@ -13,6 +13,18 @@ Use this strict selection order for each item:
 4. If all are empty, set `text_source=none` and `text=[no text available]`.
 
 Record chosen source in `text_source`.
+
+## URL Canonicalization and Dedupe Key
+Canonicalize URL before dedupe:
+- Lowercase scheme and host.
+- Remove fragment (`#...`).
+- Remove common tracking params (`utm_*`, `ref`, `source`, `fbclid`, `gclid`).
+- Keep path and semantic query params.
+
+Build `dedupe_key` priority:
+- `guid`/`id` from feed item.
+- `canonical_url(link)`.
+- `sha256(source_name + normalized_title + published_at + text_head_200)`.
 
 ## Persistent Dedupe (Frequency-Agnostic)
 1. Keep per-feed cache state:
@@ -29,9 +41,7 @@ Record chosen source in `text_source`.
 - Skip item parsing for this feed.
 
 4. Build `dedupe_key` for every parsed item using this priority:
-- `guid`/`id` from feed item.
-- Canonicalized article URL (`canonical_url(link)`).
-- `sha256(source_name + normalized_title + published_at + text_head_200)`.
+- Use the "URL Canonicalization and Dedupe Key" section above.
 
 5. Persist into seen store (SQLite/kv) with unique key:
 - `dedupe_key`
@@ -47,6 +57,7 @@ Record chosen source in `text_source`.
 7. Retention:
 - Delete seen records older than `seen_ttl_days` (default `30`).
 - This workflow applies to any run cadence (manual, cron, webhook, or ad hoc).
+- If `archived_urls_store` exists, treat it as an additional dedupe source and skip known URLs.
 
 ## Optional Incremental Window
 - Use `lookback_hours` (default `24`) to absorb late or edited feed items.
@@ -80,6 +91,56 @@ Record chosen source in `text_source`.
 - Default output should include only `new` and `updated` items.
 - If no new/updated items exist, return `no new items`.
 
+## Archive File Contract
+When `output_mode=archive`:
+
+1. Write directory:
+- Write only to `archive_dir`.
+
+2. Filename:
+- Must follow `YYYYMMDD-HHmm-{slug}.md`.
+- Time part uses `published_at` in configured timezone; fallback to `fetched_at`.
+- Slug rules:
+  - Convert to lowercase.
+  - Replace whitespace with `-`.
+  - Remove non-alphanumeric symbols except `-`.
+  - Collapse multiple `-` into one.
+  - Trim leading and trailing `-`.
+  - If empty after normalization, use `item-<hash8>`.
+- If filename collision occurs, append `-<hash6>` before `.md`.
+
+3. File header:
+- Header must include exactly these logical fields:
+  - `title`
+  - `url`
+  - `fetched_at`
+  - `source: ai-tech-rss`
+  - `status: unread`
+- Recommended format:
+
+```markdown
+---
+title: "<title>"
+url: "<canonical_url>"
+fetched_at: "<ISO-8601>"
+source: "ai-tech-rss"
+status: "unread"
+---
+```
+
+4. File body:
+- Plain text content only.
+- No generated summary sections.
+
+5. No extra files:
+- Do not create temporary/debug files.
+- Do not create placeholder names such as `-1.md`, `-w.md`, or empty files.
+- If no new items, create no new markdown files.
+
+6. Terminal response:
+- Success: print exactly `RSS_OK count=<number_of_new_files>`.
+- Failure: print `RSS_ERR reason=<text>`.
+
 ## Error Handling
 - Invalid feed/input format: report failed source and continue with valid sources.
 - Unreachable article URL: keep item and try RSS content/summary fallback.
@@ -89,8 +150,11 @@ Record chosen source in `text_source`.
 
 ## Quality Control Checklist
 - Full-text-first fallback was applied for every item.
+- `web_fetch` was attempted before RSS fallback for link-based items.
+- URL canonicalization was applied before dedupe.
 - Conditional request state was applied when available.
 - Every output item has a stable `dedupe_key`.
 - `text_source` is present and accurate for every output item.
 - Output contains plain text only (no generated summaries).
 - Duplicate items are removed according to dedupe rules.
+- Archive mode followed filename/header/response contract and created no extra files.
