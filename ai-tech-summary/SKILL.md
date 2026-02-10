@@ -32,8 +32,8 @@ python3 scripts/time_report.py \
   --date 2026-02-10 \
   --max-records 120 \
   --max-per-feed 20 \
-  --summary-chars 420 \
-  --fulltext-chars 1200 \
+  --summary-chars 8192 \
+  --fulltext-chars 8192 \
   --pretty \
   --output /tmp/ai-tech-weekly-context.json
 ```
