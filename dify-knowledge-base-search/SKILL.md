@@ -5,30 +5,36 @@ description: Dify dataset retrieve API for knowledge base chunk search/testing. 
 
 # Dify Knowledge Base Search
 
-## Required parameters
-- `data`: JSON payload containing the `query` string (optional `retrieval_model.top_k`).
-- Read from ENV:
-  - `DIFY_API_BASE_URL`: base API URL; include `/v1` in the value.
-  - `DIFY_DATASET_ID`: knowledge base (dataset) ID.
-  - `DIFY_API_KEY`: Dify API key; send as `Authorization: Bearer <DIFY_API_KEY>`.
+## Prepare required inputs
+- Provide `data` as JSON containing `query` and optional `retrieval_model.top_k`.
+- Read these env vars:
+  - `DIFY_API_BASE_URL`: base API URL and include `/v1` (example: `https://api.dify.ai/v1`).
+  - `DIFY_DATASET_ID`: target dataset ID.
+  - `DIFY_API_KEY`: send as `Authorization: Bearer <DIFY_API_KEY>`.
 
-## Quick start
+## Send request
 - Endpoint: `${DIFY_API_BASE_URL}/datasets/${DIFY_DATASET_ID}/retrieve`
-- Header: `Authorization: Bearer <DIFY_API_KEY>`
-- Body: JSON with `query` (optional `retrieval_model.top_k`); `assets/example-request.json` shows the format.
+- Headers:
+  - `Content-Type: application/json`
+  - `Authorization: Bearer <DIFY_API_KEY>`
+- Use `assets/example-request.json` as the payload template.
 
-- Example call:
-  ```bash
-  curl -sS --location --request POST "$DIFY_API_BASE_URL/datasets/$DIFY_DATASET_ID/retrieve" \
-    --header 'Content-Type: application/json' \
-    --header "Authorization: Bearer $DIFY_API_KEY" \
-    --data @assets/example-request.json
-  ```
+```bash
+curl -sS --location --request POST "$DIFY_API_BASE_URL/datasets/$DIFY_DATASET_ID/retrieve" \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer $DIFY_API_KEY" \
+  --data @assets/example-request.json
+```
 
-## Request & output
-- POST `{ "query": string, "retrieval_model"?: { "top_k": number } }`.
-- `retrieval_model.top_k`: optional; number of chunks to return. If no results, increase `top_k` moderately and retry (see `references/request-response.md`).
-- Responses: 200 with `{ query, records: [...] }`.
+## Interpret response
+- Request shape: `{ "query": string, "retrieval_model"?: { "top_k": number } }`
+- Success shape: 200 with `{ query, records: [...] }`
+- If `records` is empty, increase `retrieval_model.top_k` moderately and retry.
+
+## Troubleshoot quickly
+- If auth fails, verify `DIFY_API_KEY` and `Authorization` header format.
+- If route fails, verify `DIFY_API_BASE_URL` includes `/v1`.
+- If results are low quality, refine `query` and tune `top_k`.
 
 ## References
 - `references/env.md`

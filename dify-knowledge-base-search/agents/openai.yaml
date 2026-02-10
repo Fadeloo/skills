@@ -1,4 +1,4 @@
 interface:
   display_name: "Dify Knowledge Base Search"
-  short_description: "Retrieve Dify knowledge base chunks via API"
-  default_prompt: "Use this skill to build or debug Dify knowledge base retrieve requests: set DIFY_API_BASE_URL/DIFY_DATASET_ID/DIFY_API_KEY env vars, craft JSON payloads, and interpret response records."
+  short_description: "Build/debug Dify dataset retrieval requests"
+  default_prompt: "Use this skill to build or debug Dify dataset retrieve API calls: set DIFY_API_BASE_URL/DIFY_DATASET_ID/DIFY_API_KEY, craft payloads with query/top_k, run curl tests, and interpret records."
