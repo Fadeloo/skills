@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Tech Summary"
+  short_description: "RAG summarize AI tech RSS by time"
+  default_prompt: "Use $ai-tech-summary to retrieve time-windowed RSS evidence from SQLite and directly produce a grounded summary in the final response."
