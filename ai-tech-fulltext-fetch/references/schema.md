@@ -25,6 +25,7 @@ One row per upstream entry (`entry_id` is unique).
 - `fetched_at`: latest fetch attempt timestamp.
 - `last_error`: latest failure reason.
 - `retry_count`: failure counter, reset to `0` on success.
+- `next_retry_at`: next eligible retry time for failed rows (UTC ISO-8601).
 - `status`: `ready` or `failed`.
 - `created_at`, `updated_at`: row timestamps.
 
@@ -35,10 +36,14 @@ One row per upstream entry (`entry_id` is unique).
   - Set `status=ready`.
   - Replace text/hash/length.
   - Reset `retry_count=0`.
+  - Clear `next_retry_at`.
 - Failure with existing ready content:
   - Preserve existing text/hash/length.
   - Keep `status=ready`.
   - Increment `retry_count`, write `last_error`.
+  - Keep `next_retry_at=NULL` (no failed queue state).
 - Failure without ready content:
   - Set `status=failed`.
   - Increment `retry_count`.
+  - Compute `next_retry_at` with exponential backoff.
+  - When `retry_count` reaches `max_retries` (default `3`), this row stops entering default retry queue.

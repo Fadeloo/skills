@@ -73,7 +73,8 @@ python3 scripts/fulltext_fetch.py list-content \
 - Upsert by `entry_id`:
   - Success: write/update full text and reset `retry_count` to `0`.
   - Failure with existing `ready` content: keep old text, keep status `ready`, record `last_error`.
-  - Failure without ready content: status becomes `failed`, increment `retry_count`.
+  - Failure without ready content: status becomes `failed`, increment `retry_count`, set `next_retry_at`.
+- Failed retries are capped by `--max-retries` (default `3`) and paced by `--retry-backoff-minutes`.
 - `--force` allows refetching already `ready` rows.
 - `--refetch-days N` allows refreshing rows older than `N` days.
 
@@ -83,9 +84,12 @@ python3 scripts/fulltext_fetch.py list-content \
 - `--force`
 - `--only-failed`
 - `--refetch-days`
+- `--oldest-first`
 - `--timeout`
 - `--max-bytes`
 - `--min-chars`
+- `--max-retries`
+- `--retry-backoff-minutes`
 - `--user-agent`
 - `--disable-trafilatura`
 - `--fail-on-errors`

@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -74,8 +75,13 @@ CREATE TABLE IF NOT EXISTS entries (
 
 CREATE INDEX IF NOT EXISTS idx_feeds_active ON feeds(is_active);
 CREATE INDEX IF NOT EXISTS idx_feeds_last_checked_at ON feeds(last_checked_at);
+CREATE INDEX IF NOT EXISTS idx_feeds_active_checked_expr ON feeds(is_active, COALESCE(last_checked_at, ''), id);
 CREATE INDEX IF NOT EXISTS idx_entries_last_seen_at ON entries(last_seen_at);
 CREATE INDEX IF NOT EXISTS idx_entries_published_at ON entries(published_at);
+CREATE INDEX IF NOT EXISTS idx_entries_event_ts_id
+    ON entries(COALESCE(CASE WHEN published_at GLOB '????-??-??T*Z' THEN published_at END, first_seen_at, last_seen_at), id);
+CREATE INDEX IF NOT EXISTS idx_entries_sort_pub_seen_id
+    ON entries(COALESCE(CASE WHEN published_at GLOB '????-??-??T*Z' THEN published_at END, first_seen_at), id);
 """
 
 
@@ -124,22 +130,53 @@ def canonicalize_url(url: str) -> str:
     return normalized
 
 
-def struct_time_to_iso(value: Any) -> str | None:
-    if not value:
+def parse_datetime_utc(raw: Any) -> datetime | None:
+    if raw is None:
         return None
+    if hasattr(raw, "tm_year"):
+        try:
+            dt = datetime(
+                int(raw.tm_year),
+                int(raw.tm_mon),
+                int(raw.tm_mday),
+                int(raw.tm_hour),
+                int(raw.tm_min),
+                int(raw.tm_sec),
+                tzinfo=timezone.utc,
+            )
+            return dt
+        except Exception:
+            pass
+
+    text = normalize_space(str(raw))
+    if not text:
+        return None
+
+    iso_candidate = text
+    if iso_candidate.endswith("Z"):
+        iso_candidate = iso_candidate[:-1] + "+00:00"
     try:
-        dt = datetime(
-            int(value.tm_year),
-            int(value.tm_mon),
-            int(value.tm_mday),
-            int(value.tm_hour),
-            int(value.tm_min),
-            int(value.tm_sec),
-            tzinfo=timezone.utc,
-        )
-        return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        dt = datetime.fromisoformat(iso_candidate)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        pass
+
+    try:
+        dt = parsedate_to_datetime(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
+
+
+def to_utc_iso(raw: Any) -> str | None:
+    dt = parse_datetime_utc(raw)
+    if dt is None:
+        return None
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def require_feedparser() -> None:
@@ -160,6 +197,7 @@ def connect_db(db_path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -220,8 +258,8 @@ def build_entry_record(feed_url: str, entry: Any) -> dict[str, Any]:
     title = normalize_space(str(entry.get("title") or ""))
     author = normalize_space(str(entry.get("author") or ""))
     summary = normalize_space(str(entry.get("summary") or entry.get("description") or ""))
-    published_at = struct_time_to_iso(entry.get("published_parsed")) or normalize_space(str(entry.get("published") or ""))
-    updated_at = struct_time_to_iso(entry.get("updated_parsed")) or normalize_space(str(entry.get("updated") or ""))
+    published_at = to_utc_iso(entry.get("published_parsed")) or to_utc_iso(entry.get("published"))
+    updated_at = to_utc_iso(entry.get("updated_parsed")) or to_utc_iso(entry.get("updated"))
 
     category_terms: list[str] = []
     for tag in entry.get("tags") or []:
@@ -233,20 +271,23 @@ def build_entry_record(feed_url: str, entry: Any) -> dict[str, Any]:
             category_terms.append(term)
     categories = sorted(set(category_terms))
 
+    legacy_guid_dedupe_key = None
     if guid:
-        dedupe_key = f"guid:{guid}"
+        feed_scope = canonicalize_url(feed_url) or normalize_space(feed_url)
+        dedupe_key = f"guid:{feed_scope}:{guid}"
+        legacy_guid_dedupe_key = f"guid:{guid}"
     elif canonical_url:
         dedupe_key = f"url:{canonical_url}"
     else:
-        fallback = "|".join([feed_url, title, published_at, summary[:200]])
+        fallback = "|".join([feed_url, title, published_at or "", summary[:200]])
         dedupe_key = f"hash:{sha256_hexdigest(fallback)}"
 
     content_basis = "|".join(
         [
             title,
             summary,
-            published_at,
-            updated_at,
+            published_at or "",
+            updated_at or "",
             canonical_url or raw_url,
             ",".join(categories),
         ]
@@ -269,6 +310,7 @@ def build_entry_record(feed_url: str, entry: Any) -> dict[str, Any]:
 
     return {
         "dedupe_key": dedupe_key,
+        "legacy_guid_dedupe_key": legacy_guid_dedupe_key,
         "guid": guid or None,
         "url": raw_url or None,
         "canonical_url": canonical_url or None,
@@ -289,6 +331,11 @@ def upsert_entry(conn: sqlite3.Connection, feed_id: int, feed_url: str, entry: A
         "SELECT id, content_hash FROM entries WHERE dedupe_key = ?",
         (record["dedupe_key"],),
     ).fetchone()
+    if not existing and record["legacy_guid_dedupe_key"]:
+        existing = conn.execute(
+            "SELECT id, content_hash FROM entries WHERE dedupe_key = ?",
+            (record["legacy_guid_dedupe_key"],),
+        ).fetchone()
 
     if not existing:
         conn.execute(
@@ -546,6 +593,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             )
             for key in ("feeds_checked", "feeds_nochange", "new", "updated", "unchanged", "errors"):
                 totals[key] += int(row_result.get(key, 0))
+            conn.commit()
 
         if args.cleanup_ttl_days > 0:
             totals["cleanup_deleted"] = cleanup_stale_entries(conn, args.cleanup_ttl_days)
@@ -595,7 +643,7 @@ def cmd_list_entries(args: argparse.Namespace) -> int:
             SELECT e.id, e.dedupe_key, e.title, e.canonical_url, e.published_at, e.last_seen_at, f.feed_url
             FROM entries e
             JOIN feeds f ON f.id = e.last_feed_id
-            ORDER BY COALESCE(e.published_at, e.first_seen_at) DESC, e.id DESC
+            ORDER BY COALESCE(CASE WHEN e.published_at GLOB '????-??-??T*Z' THEN e.published_at END, e.first_seen_at) DESC, e.id DESC
             LIMIT ?
             """,
             (args.limit,),

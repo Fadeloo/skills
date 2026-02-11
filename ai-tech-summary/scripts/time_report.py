@@ -55,6 +55,14 @@ ALL_FIELDS = {
     "fulltext_excerpt",
 }
 
+EVENT_TS_SQL_EXPR = (
+    "COALESCE("
+    "CASE WHEN e.published_at GLOB '????-??-??T*Z' THEN e.published_at END, "
+    "e.first_seen_at, "
+    "e.last_seen_at"
+    ")"
+)
+
 STOPWORDS = {
     "about",
     "after",
@@ -271,6 +279,8 @@ def connect_db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_file))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -309,7 +319,27 @@ def tokenize(text: str) -> list[str]:
     return cleaned
 
 
-def load_rows(conn: sqlite3.Connection) -> tuple[list[sqlite3.Row], bool]:
+def count_rows_in_range(conn: sqlite3.Connection, start_utc_iso: str, end_utc_iso: str) -> int:
+    row = conn.execute(
+        f"""
+        SELECT COUNT(1) AS c
+        FROM entries e
+        WHERE {EVENT_TS_SQL_EXPR} >= ?
+          AND {EVENT_TS_SQL_EXPR} < ?
+        """,
+        (start_utc_iso, end_utc_iso),
+    ).fetchone()
+    if not row:
+        return 0
+    return int(row["c"] or 0)
+
+
+def load_rows(
+    conn: sqlite3.Connection,
+    start_utc_iso: str,
+    end_utc_iso: str,
+    limit: int,
+) -> tuple[list[sqlite3.Row], bool]:
     has_entry_content = table_exists(conn, "entry_content")
 
     content_columns = (
@@ -343,9 +373,15 @@ def load_rows(conn: sqlite3.Connection) -> tuple[list[sqlite3.Row], bool]:
     FROM entries e
     LEFT JOIN feeds f ON f.id = e.last_feed_id
     {join_clause}
-    ORDER BY e.id DESC
+    WHERE {EVENT_TS_SQL_EXPR} >= ?
+      AND {EVENT_TS_SQL_EXPR} < ?
+    ORDER BY {EVENT_TS_SQL_EXPR} DESC, e.id DESC
     """
-    rows = conn.execute(sql).fetchall()
+    params: list[Any] = [start_utc_iso, end_utc_iso]
+    if limit > 0:
+        sql += " LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(sql, tuple(params)).fetchall()
     return rows, has_entry_content
 
 
@@ -394,21 +430,11 @@ def build_record(row: sqlite3.Row, summary_chars: int, fulltext_chars: int) -> d
 
 def filter_and_rank_records(
     records: list[dict[str, Any]],
-    start: datetime,
-    end: datetime,
     max_records: int,
     max_per_feed: int,
-) -> tuple[list[dict[str, Any]], int]:
-    in_range_records: list[dict[str, Any]] = []
-    for record in records:
-        ts = parse_datetime_utc(record.get("timestamp_utc"))
-        if ts is None:
-            continue
-        if start <= ts < end:
-            in_range_records.append(record)
-
+) -> list[dict[str, Any]]:
+    in_range_records = list(records)
     in_range_records.sort(key=lambda item: item["timestamp_utc"], reverse=True)
-    total_in_range = len(in_range_records)
 
     if max_per_feed > 0:
         limited: list[dict[str, Any]] = []
@@ -423,7 +449,7 @@ def filter_and_rank_records(
 
     if max_records > 0:
         in_range_records = in_range_records[:max_records]
-    return in_range_records, total_in_range
+    return in_range_records
 
 
 def compute_aggregates(records: list[dict[str, Any]], top_feeds: int, top_keywords: int) -> dict[str, Any]:
@@ -543,7 +569,19 @@ def run(args: argparse.Namespace) -> int:
             )
             return 2
 
-        rows, has_entry_content = load_rows(conn)
+        start_utc_iso = start.isoformat().replace("+00:00", "Z")
+        end_utc_iso = end.isoformat().replace("+00:00", "Z")
+        total_in_range = count_rows_in_range(conn, start_utc_iso=start_utc_iso, end_utc_iso=end_utc_iso)
+        if args.max_records > 0 and args.max_per_feed <= 0:
+            fetch_limit = args.max_records
+        else:
+            fetch_limit = total_in_range
+        rows, has_entry_content = load_rows(
+            conn,
+            start_utc_iso=start_utc_iso,
+            end_utc_iso=end_utc_iso,
+            limit=fetch_limit,
+        )
 
     records_raw: list[dict[str, Any]] = []
     for row in rows:
@@ -551,10 +589,8 @@ def run(args: argparse.Namespace) -> int:
         if record is not None:
             records_raw.append(record)
 
-    records_filtered, total_in_range = filter_and_rank_records(
+    records_filtered = filter_and_rank_records(
         records=records_raw,
-        start=start,
-        end=end,
         max_records=args.max_records,
         max_per_feed=args.max_per_feed,
     )

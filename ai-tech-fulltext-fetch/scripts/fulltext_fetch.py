@@ -24,6 +24,9 @@ except ImportError:
 
 DEFAULT_DB_PATH = "rss_metadata.db"
 DEFAULT_USER_AGENT = "ai-tech-fulltext-fetch/1.0 (+https://github.com/tiangong-ai/skills)"
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BACKOFF_MINUTES = 30
+MAX_RETRY_BACKOFF_MINUTES = 24 * 60
 BINARY_CONTENT_PREFIXES = (
     "application/pdf",
     "application/zip",
@@ -47,6 +50,7 @@ CREATE TABLE IF NOT EXISTS entry_content (
     fetched_at TEXT NOT NULL,
     last_error TEXT,
     retry_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -56,6 +60,8 @@ CREATE TABLE IF NOT EXISTS entry_content (
 CREATE INDEX IF NOT EXISTS idx_entry_content_status ON entry_content(status);
 CREATE INDEX IF NOT EXISTS idx_entry_content_updated_at ON entry_content(updated_at);
 CREATE INDEX IF NOT EXISTS idx_entry_content_retry_count ON entry_content(retry_count);
+CREATE INDEX IF NOT EXISTS idx_entry_content_status_updated_entry
+    ON entry_content(status, updated_at DESC, entry_id DESC);
 """
 
 
@@ -157,6 +163,39 @@ def now_utc_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def parse_utc_iso(value: str | None) -> datetime:
+    text = normalize_space(str(value or ""))
+    if not text:
+        return datetime.now(timezone.utc)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def compute_next_retry_at(
+    fetched_at: str,
+    retry_count: int,
+    max_retries: int,
+    retry_backoff_minutes: int,
+) -> str | None:
+    if max_retries > 0 and retry_count >= max_retries:
+        return None
+    base_minutes = max(int(retry_backoff_minutes), 0)
+    if base_minutes == 0:
+        wait_minutes = 0
+    else:
+        exponent = max(retry_count - 1, 0)
+        wait_minutes = min(base_minutes * (2**exponent), MAX_RETRY_BACKOFF_MINUTES)
+    next_retry = parse_utc_iso(fetched_at) + timedelta(minutes=wait_minutes)
+    return next_retry.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def normalize_space(value: str) -> str:
     return " ".join(value.split())
 
@@ -223,6 +262,16 @@ def ensure_entries_table(conn: sqlite3.Connection) -> None:
 def init_db(conn: sqlite3.Connection) -> None:
     ensure_entries_table(conn)
     conn.executescript(SCHEMA_SQL)
+    columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(entry_content)").fetchall()
+    }
+    if "next_retry_at" not in columns:
+        conn.execute("ALTER TABLE entry_content ADD COLUMN next_retry_at TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entry_content_failed_retry "
+        "ON entry_content(status, next_retry_at, retry_count)"
+    )
 
 
 def choose_entry_url(row: sqlite3.Row) -> str:
@@ -434,6 +483,8 @@ def list_candidate_entries(
     force: bool,
     only_failed: bool,
     refetch_days: int,
+    oldest_first: bool,
+    max_retries: int,
 ) -> list[sqlite3.Row]:
     sql = """
     SELECT
@@ -449,19 +500,49 @@ def list_candidate_entries(
     WHERE COALESCE(NULLIF(e.canonical_url, ''), NULLIF(e.url, '')) IS NOT NULL
     """
     params: list[Any] = []
+    now_iso = now_utc_iso()
+    failed_retry_clause = "ec.status = 'failed' AND (ec.next_retry_at IS NULL OR ec.next_retry_at <= ?)"
+    failed_retry_params: list[Any] = [now_iso]
+    if max_retries > 0:
+        failed_retry_clause += " AND ec.retry_count < ?"
+        failed_retry_params.append(max_retries)
 
     if only_failed:
-        sql += " AND ec.status = 'failed'"
+        sql += f" AND ({failed_retry_clause})"
+        params.extend(failed_retry_params)
     elif not force:
         if refetch_days > 0:
             threshold = datetime.now(timezone.utc) - timedelta(days=refetch_days)
             threshold_iso = threshold.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-            sql += " AND (ec.entry_id IS NULL OR ec.status != 'ready' OR ec.fetched_at < ?)"
+            sql += (
+                " AND (ec.entry_id IS NULL "
+                f"OR ({failed_retry_clause}) "
+                "OR (ec.status = 'ready' AND ec.fetched_at < ?))"
+            )
+            params.extend(failed_retry_params)
             params.append(threshold_iso)
         else:
-            sql += " AND (ec.entry_id IS NULL OR ec.status != 'ready')"
+            sql += f" AND (ec.entry_id IS NULL OR ({failed_retry_clause}))"
+            params.extend(failed_retry_params)
 
-    sql += " ORDER BY COALESCE(ec.updated_at, '') ASC, e.id ASC"
+    if oldest_first:
+        sql += " ORDER BY COALESCE(ec.updated_at, '') ASC, e.id ASC"
+    else:
+        # Prioritize fresh/unfetched rows to improve hit-rate under bounded --limit.
+        sql += """
+        ORDER BY
+            CASE
+                WHEN ec.entry_id IS NULL THEN 0
+                WHEN ec.status = 'failed' THEN 1
+                ELSE 2
+            END ASC,
+            CASE
+                WHEN ec.status = 'failed' THEN ec.retry_count
+                ELSE 0
+            END ASC,
+            COALESCE(e.published_at, e.first_seen_at, e.last_seen_at, '') DESC,
+            e.id DESC
+        """
     if limit > 0:
         sql += " LIMIT ?"
         params.append(limit)
@@ -474,10 +555,12 @@ def persist_extract_result(
     entry_id: int,
     result: ExtractResult,
     fetched_at: str,
+    max_retries: int,
+    retry_backoff_minutes: int,
 ) -> str:
     existing = conn.execute(
         """
-        SELECT status, content_hash, content_text, content_length, retry_count
+        SELECT status, content_hash, content_text, content_length, retry_count, next_retry_at
         FROM entry_content
         WHERE entry_id = ?
         """,
@@ -490,6 +573,7 @@ def persist_extract_result(
         content_hash = result.content_hash
         content_length = int(result.content_length)
         retry_count = 0
+        next_retry_at = None
         last_error = None
         if not existing:
             state = "ready_new"
@@ -500,6 +584,12 @@ def persist_extract_result(
     else:
         previous_retry = int(existing["retry_count"]) if existing else 0
         retry_count = previous_retry + 1
+        next_retry_at = compute_next_retry_at(
+            fetched_at=fetched_at,
+            retry_count=retry_count,
+            max_retries=max_retries,
+            retry_backoff_minutes=retry_backoff_minutes,
+        )
         last_error = result.last_error
         keep_ready_content = (
             existing is not None
@@ -511,6 +601,7 @@ def persist_extract_result(
             content_text = str(existing["content_text"] or "")
             content_hash = str(existing["content_hash"] or "")
             content_length = int(existing["content_length"] or len(content_text))
+            next_retry_at = None
             state = "ready_retained"
         else:
             status_value = "failed"
@@ -524,9 +615,9 @@ def persist_extract_result(
             """
             INSERT INTO entry_content (
                 entry_id, source_url, final_url, http_status, extractor, content_text,
-                content_hash, content_length, fetched_at, last_error, retry_count, status,
+                content_hash, content_length, fetched_at, last_error, retry_count, next_retry_at, status,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 entry_id,
@@ -540,6 +631,7 @@ def persist_extract_result(
                 fetched_at,
                 last_error,
                 retry_count,
+                next_retry_at,
                 status_value,
                 fetched_at,
                 fetched_at,
@@ -560,6 +652,7 @@ def persist_extract_result(
             fetched_at = ?,
             last_error = ?,
             retry_count = ?,
+            next_retry_at = ?,
             status = ?,
             updated_at = ?
         WHERE entry_id = ?
@@ -575,6 +668,7 @@ def persist_extract_result(
             fetched_at,
             last_error,
             retry_count,
+            next_retry_at,
             status_value,
             fetched_at,
             entry_id,
@@ -611,8 +705,22 @@ def process_entry(conn: sqlite3.Connection, row: sqlite3.Row, args: argparse.Nam
         )
 
     fetched_at = now_utc_iso()
-    state = persist_extract_result(conn, int(row["entry_id"]), result, fetched_at)
+    state = persist_extract_result(
+        conn=conn,
+        entry_id=int(row["entry_id"]),
+        result=result,
+        fetched_at=fetched_at,
+        max_retries=args.max_retries,
+        retry_backoff_minutes=args.retry_backoff_minutes,
+    )
     return state, result
+
+
+def validate_retry_args(args: argparse.Namespace) -> None:
+    if int(args.max_retries) < 0:
+        raise ValueError("invalid_max_retries")
+    if int(args.retry_backoff_minutes) < 0:
+        raise ValueError("invalid_retry_backoff_minutes")
 
 
 def cmd_init_db(args: argparse.Namespace) -> int:
@@ -624,6 +732,7 @@ def cmd_init_db(args: argparse.Namespace) -> int:
 
 
 def cmd_fetch_entry(args: argparse.Namespace) -> int:
+    validate_retry_args(args)
     with connect_db(args.db) as conn:
         init_db(conn)
         row = conn.execute(
@@ -656,6 +765,7 @@ def cmd_fetch_entry(args: argparse.Namespace) -> int:
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
+    validate_retry_args(args)
     totals = {
         "checked": 0,
         "ready_new": 0,
@@ -674,6 +784,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
             force=args.force,
             only_failed=args.only_failed,
             refetch_days=args.refetch_days,
+            oldest_first=args.oldest_first,
+            max_retries=args.max_retries,
         )
         if not rows:
             print(
@@ -686,6 +798,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
             state, _ = process_entry(conn, row, args)
             totals["checked"] += 1
             totals[state] += 1
+            if totals["checked"] % 20 == 0:
+                conn.commit()
 
         conn.commit()
 
@@ -715,6 +829,7 @@ def cmd_list_content(args: argparse.Namespace) -> int:
             ec.status,
             ec.content_length,
             ec.retry_count,
+            ec.next_retry_at,
             ec.http_status,
             ec.extractor,
             ec.fetched_at,
@@ -732,13 +847,14 @@ def cmd_list_content(args: argparse.Namespace) -> int:
         params.append(args.limit)
         rows = conn.execute(sql, tuple(params)).fetchall()
 
-    print("entry_id\tstatus\tchars\tretry\thttp_status\textractor\tfetched_at\ttitle\turl\tlast_error")
+    print("entry_id\tstatus\tchars\tretry\tnext_retry_at\thttp_status\textractor\tfetched_at\ttitle\turl\tlast_error")
     for row in rows:
         title = (str(row["title"] or "")).replace("\t", " ").replace("\n", " ").strip()
         url = (str(row["url"] or "")).replace("\t", " ").replace("\n", " ").strip()
         error_text = (str(row["last_error"] or "")).replace("\t", " ").replace("\n", " ").strip()
         print(
             f"{row['entry_id']}\t{row['status']}\t{row['content_length']}\t{row['retry_count']}\t"
+            f"{row['next_retry_at'] or ''}\t"
             f"{row['http_status'] or ''}\t{row['extractor']}\t{row['fetched_at']}\t"
             f"{title}\t{url}\t{error_text}"
         )
@@ -766,9 +882,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="When > 0, also refetch ready rows older than this number of days.",
     )
+    parser_sync.add_argument(
+        "--oldest-first",
+        action="store_true",
+        help="Use historical queue order (oldest first). Default prioritizes freshest rows.",
+    )
     parser_sync.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds.")
     parser_sync.add_argument("--max-bytes", type=int, default=2_000_000, help="Max bytes to read per response.")
     parser_sync.add_argument("--min-chars", type=int, default=300, help="Minimum extracted characters for ready.")
+    parser_sync.add_argument(
+        "--max-retries",
+        type=int,
+        default=DEFAULT_MAX_RETRIES,
+        help=f"Max failed retries per entry (default: {DEFAULT_MAX_RETRIES}, 0 means unlimited).",
+    )
+    parser_sync.add_argument(
+        "--retry-backoff-minutes",
+        type=int,
+        default=DEFAULT_RETRY_BACKOFF_MINUTES,
+        help=(
+            f"Base minutes for exponential retry backoff "
+            f"(default: {DEFAULT_RETRY_BACKOFF_MINUTES}, 0 disables waiting)."
+        ),
+    )
     parser_sync.add_argument(
         "--user-agent",
         default=DEFAULT_USER_AGENT,
@@ -792,6 +928,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser_fetch_entry.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds.")
     parser_fetch_entry.add_argument("--max-bytes", type=int, default=2_000_000, help="Max bytes to read per response.")
     parser_fetch_entry.add_argument("--min-chars", type=int, default=300, help="Minimum extracted characters for ready.")
+    parser_fetch_entry.add_argument(
+        "--max-retries",
+        type=int,
+        default=DEFAULT_MAX_RETRIES,
+        help=f"Max failed retries per entry (default: {DEFAULT_MAX_RETRIES}, 0 means unlimited).",
+    )
+    parser_fetch_entry.add_argument(
+        "--retry-backoff-minutes",
+        type=int,
+        default=DEFAULT_RETRY_BACKOFF_MINUTES,
+        help=(
+            f"Base minutes for exponential retry backoff "
+            f"(default: {DEFAULT_RETRY_BACKOFF_MINUTES}, 0 disables waiting)."
+        ),
+    )
     parser_fetch_entry.add_argument(
         "--user-agent",
         default=DEFAULT_USER_AGENT,
@@ -831,6 +982,19 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
+        if reason == "invalid_max_retries":
+            print(
+                "FULLTEXT_ERR reason=invalid_max_retries detail='--max-retries must be >= 0.'",
+                file=sys.stderr,
+            )
+            return 1
+        if reason == "invalid_retry_backoff_minutes":
+            print(
+                "FULLTEXT_ERR reason=invalid_retry_backoff_minutes "
+                "detail='--retry-backoff-minutes must be >= 0.'",
+                file=sys.stderr,
+            )
+            return 1
         print(f"FULLTEXT_ERR reason=value_error detail={reason}", file=sys.stderr)
         return 1
     except Exception as exc:

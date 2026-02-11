@@ -8,7 +8,7 @@ Canonicalize URL before dedupe:
 - Keep path and semantic query params.
 
 Build `dedupe_key` priority:
-- `guid`/`id` from feed item.
+- Feed-scoped `guid`/`id` from feed item (`guid:<feed_url>:<guid>`), to avoid cross-feed collisions.
 - `canonical_url(link)`.
 - `sha256(feed_url + normalized_title + published_at + summary_head_200)`.
 
@@ -28,6 +28,7 @@ Build `dedupe_key` priority:
 
 4. Build `dedupe_key` for every parsed item using this priority:
 - Use the "URL Canonicalization and Dedupe Key" section above.
+- Keep backward compatibility when historical rows used legacy key format (`guid:<guid>`).
 
 5. Persist into seen store (SQLite/kv) with unique key:
 - `dedupe_key`

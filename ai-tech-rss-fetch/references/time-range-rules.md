@@ -8,6 +8,7 @@
 - Normalize parsed `published` / `updated` timestamps to UTC ISO-8601.
 - Persist original ordering with feed publish time when available.
 - Keep `first_seen_at` and `last_seen_at` in UTC.
+- If `published` / `updated` cannot be parsed into UTC time, persist `NULL` for those fields.
 
 ## Incremental Sync Rules
 - Use feed caching state (`etag`, `last_modified`) to reduce bandwidth.
