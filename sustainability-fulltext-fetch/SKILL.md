@@ -1,12 +1,13 @@
 ---
 name: sustainability-fulltext-fetch
-description: Fetch and persist content for DOI-keyed sustainability RSS entries from the shared SQLite DB, using OpenAlex/Semantic Scholar API metadata first and webpage fulltext extraction as fallback. Use when building resilient DOI-first content enrichment after relevance labeling.
+description: Fetch and persist content for DOI-keyed sustainability RSS entries from a separate fulltext SQLite DB, using OpenAlex/Semantic Scholar API metadata first and webpage fulltext extraction as fallback. Use when building resilient DOI-first content enrichment after relevance labeling.
 ---
 
 # Sustainability Fulltext Fetch
 
 ## Core Goal
-- Reuse the same SQLite DB populated by `sustainability-rss-fetch`.
+- Read relevant DOI entries from RSS metadata DB.
+- Write fetched content into a separate fulltext DB.
 - Process only relevant entries (`is_relevant=1`).
 - Prefer API metadata retrieval by DOI (OpenAlex first, Semantic Scholar fallback).
 - Fallback to webpage fulltext extraction when API metadata is unavailable.
@@ -22,14 +23,16 @@ description: Fetch and persist content for DOI-keyed sustainability RSS entries 
 
 ```bash
 export SUSTAIN_RSS_DB_PATH="/absolute/path/to/workspace-rss-bot/sustainability_rss.db"
-python3 scripts/fulltext_fetch.py init-db --db "$SUSTAIN_RSS_DB_PATH"
+export SUSTAIN_FULLTEXT_DB_PATH="/absolute/path/to/workspace-rss-bot/sustainability_fulltext.db"
+python3 scripts/fulltext_fetch.py init-db --content-db "$SUSTAIN_FULLTEXT_DB_PATH"
 ```
 
 2. Run incremental sync (API first, webpage fallback).
 
 ```bash
 python3 scripts/fulltext_fetch.py sync \
-  --db "$SUSTAIN_RSS_DB_PATH" \
+  --rss-db "$SUSTAIN_RSS_DB_PATH" \
+  --content-db "$SUSTAIN_FULLTEXT_DB_PATH" \
   --limit 50 \
   --openalex-email "you@example.com" \
   --api-min-chars 80 \
@@ -40,7 +43,8 @@ python3 scripts/fulltext_fetch.py sync \
 
 ```bash
 python3 scripts/fulltext_fetch.py fetch-entry \
-  --db "$SUSTAIN_RSS_DB_PATH" \
+  --rss-db "$SUSTAIN_RSS_DB_PATH" \
+  --content-db "$SUSTAIN_FULLTEXT_DB_PATH" \
   --doi "10.1038/nature12373"
 ```
 
@@ -48,15 +52,16 @@ python3 scripts/fulltext_fetch.py fetch-entry \
 
 ```bash
 python3 scripts/fulltext_fetch.py list-content \
-  --db "$SUSTAIN_RSS_DB_PATH" \
+  --rss-db "$SUSTAIN_RSS_DB_PATH" \
+  --content-db "$SUSTAIN_FULLTEXT_DB_PATH" \
   --status ready \
   --limit 100
 ```
 
 ## Data Contract
-- Reads from `entries`:
+- Reads from RSS DB `entries`:
   - `doi`, `doi_is_surrogate`, `is_relevant`, `canonical_url`, `url`, `title`.
-- Writes to `entry_content` (primary key `doi`):
+- Writes to fulltext DB `entry_content` (primary key `doi`):
   - source URL/status/extractor
   - `content_kind` (`abstract` or `fulltext`)
   - `content_text`, `content_hash`, `content_length`
@@ -80,8 +85,10 @@ python3 scripts/fulltext_fetch.py list-content \
 - Failure without ready row: set `status=failed`, increment retry state.
 
 ## Configurable Parameters
-- `--db`
+- `--rss-db`
+- `--content-db`
 - `SUSTAIN_RSS_DB_PATH`
+- `SUSTAIN_FULLTEXT_DB_PATH`
 - `--limit`
 - `--force`
 - `--only-failed`
@@ -102,6 +109,7 @@ python3 scripts/fulltext_fetch.py list-content \
 
 ## Error Handling
 - Missing DOI-keyed `entries` table: stop with actionable message.
+- RSS DB and fulltext DB path collision: fail fast and require separate files.
 - API/network/HTTP failures: record failures and continue queue.
 - Webpage non-text content: mark failed for that DOI.
 - Short extraction: fail by threshold to avoid low-quality content.

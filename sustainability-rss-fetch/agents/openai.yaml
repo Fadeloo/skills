@@ -1,4 +1,4 @@
 interface:
   display_name: "Sustainability RSS Fetch"
   short_description: "Ingest all RSS rows by DOI, then label relevance"
-  default_prompt: "Use $sustainability-rss-fetch to ingest all RSS items into shared SQLite by DOI first, then mark selected candidates relevant and prune non-relevant rows to DOI-only."
+  default_prompt: "Use $sustainability-rss-fetch to ingest all RSS items into the dedicated sustainability RSS DB by DOI first, then mark selected candidates relevant and prune non-relevant rows to DOI-only."

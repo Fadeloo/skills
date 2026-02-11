@@ -1,5 +1,6 @@
 {
-  "db_path": "/absolute/path/to/workspace-rss-bot/sustainability_rss.db",
+  "rss_db_path": "/absolute/path/to/workspace-rss-bot/sustainability_rss.db",
+  "content_db_path": "/absolute/path/to/workspace-rss-bot/sustainability_fulltext.db",
   "period": "weekly",
   "date": "2026-02-10",
   "start": "2026-02-01",

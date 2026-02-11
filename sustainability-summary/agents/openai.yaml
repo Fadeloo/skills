@@ -1,4 +1,4 @@
 interface:
   display_name: "Sustainability Summary"
   short_description: "Summarize relevant DOI evidence by time window"
-  default_prompt: "Use $sustainability-summary to retrieve time-windowed relevant DOI records from shared SQLite and produce a grounded summary with DOI/URL evidence anchors."
+  default_prompt: "Use $sustainability-summary to retrieve time-windowed relevant DOI records from RSS DB, optionally join fulltext DB evidence, and produce a grounded summary with DOI/URL anchors."

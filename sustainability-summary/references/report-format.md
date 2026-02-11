@@ -1,6 +1,7 @@
 # RAG Context Format
 
 `time_report.py` outputs JSON context for agent-side summarization.
+`entry_content` fields are included only when `--content-db` exists and has `entry_content`.
 
 ## Top-level schema
 

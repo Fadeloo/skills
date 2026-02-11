@@ -1,14 +1,14 @@
 ---
 name: sustainability-summary
-description: Retrieve time-windowed relevant sustainability RSS evidence from the shared SQLite database and let the agent produce final summaries using DOI-keyed records and optional enriched content. Use when generating grounded daily, weekly, monthly, or custom-range digests after relevance labeling.
+description: Retrieve time-windowed relevant sustainability RSS evidence from the RSS metadata SQLite database and optionally join DOI-keyed enriched content from a separate fulltext SQLite database. Use when generating grounded daily, weekly, monthly, or custom-range digests after relevance labeling.
 ---
 
 # Sustainability Summary
 
 ## Core Goal
-- Read only relevant (`is_relevant=1`) records from shared SQLite.
+- Read only relevant (`is_relevant=1`) records from RSS DB.
 - Build compact RAG context from DOI-keyed entries.
-- Include optional enriched content from `entry_content` when available.
+- Include optional enriched content from separate fulltext DB `entry_content` when available.
 - Let the agent synthesize final summary text with evidence anchors.
 
 ## Triggering Conditions
@@ -19,17 +19,19 @@ description: Retrieve time-windowed relevant sustainability RSS evidence from th
 ## Input Requirements
 - Required tables: `feeds`, `entries` (from `sustainability-rss-fetch`).
 - `entries` must be DOI-keyed and relevance-labeled.
-- Optional table: `entry_content` (from `sustainability-fulltext-fetch`).
-- Use the same absolute DB path in all sustainability skills.
+- Optional fulltext DB table: `entry_content` (from `sustainability-fulltext-fetch`).
+- RSS DB and fulltext DB must be different files.
 
 ## Workflow
 1. Build retrieval context by time window.
 
 ```bash
 export SUSTAIN_RSS_DB_PATH="/absolute/path/to/workspace-rss-bot/sustainability_rss.db"
+export SUSTAIN_FULLTEXT_DB_PATH="/absolute/path/to/workspace-rss-bot/sustainability_fulltext.db"
 
 python3 scripts/time_report.py \
-  --db "$SUSTAIN_RSS_DB_PATH" \
+  --rss-db "$SUSTAIN_RSS_DB_PATH" \
+  --content-db "$SUSTAIN_FULLTEXT_DB_PATH" \
   --period weekly \
   --date 2026-02-10 \
   --max-records 120 \
@@ -54,8 +56,10 @@ python3 scripts/time_report.py \
 - `doi,timestamp_utc,timestamp_source,feed_title,feed_url,title,url,summary,fulltext_status,fulltext_length,fulltext_excerpt`
 
 ## Configurable Parameters
-- `--db`
+- `--rss-db`
+- `--content-db`
 - `SUSTAIN_RSS_DB_PATH`
+- `SUSTAIN_FULLTEXT_DB_PATH`
 - `--period`
 - `--date`
 - `--start`
@@ -73,6 +77,7 @@ python3 scripts/time_report.py \
 
 ## Error Handling
 - Missing required DOI-based tables: fail fast with setup guidance.
+- RSS DB and fulltext DB path collision: fail fast and require separate files.
 - Invalid date/time/field list: return parse errors.
 - Missing `entry_content`: continue in metadata-only mode.
 - Empty relevant set: return empty context; optional failure with `--fail-on-empty`.

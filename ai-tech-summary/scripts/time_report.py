@@ -164,7 +164,11 @@ def resolve_db_path(db_path: str) -> Path:
     if not raw:
         raw = DEFAULT_DB_PATH
 
-    return Path(raw).expanduser()
+    path = Path(raw).expanduser()
+    looks_like_directory = raw.endswith(("/", "\\")) or path.is_dir() or path.suffix == ""
+    if looks_like_directory:
+        path = path / DEFAULT_DB_FILENAME
+    return path
 
 
 def truncate_text(value: str, max_chars: int) -> str:

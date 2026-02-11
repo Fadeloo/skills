@@ -41,5 +41,6 @@ Optional selection controls:
 ## Operational Guidance
 
 - Run `sustainability-rss-fetch insert-selected` first to keep relevant scope strict.
+- Keep RSS DB (`SUSTAIN_RSS_DB_PATH`) and fulltext DB (`SUSTAIN_FULLTEXT_DB_PATH`) as different files.
 - Configure `OPENALEX_EMAIL` (and optional `S2_API_KEY`) for better API reliability.
 - Keep `--limit` bounded for predictable runtime per job.

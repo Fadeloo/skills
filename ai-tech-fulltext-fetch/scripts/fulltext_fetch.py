@@ -240,7 +240,11 @@ def resolve_db_path(db_path: str) -> Path:
     if not raw:
         raw = DEFAULT_DB_PATH
 
-    return Path(raw).expanduser()
+    path = Path(raw).expanduser()
+    looks_like_directory = raw.endswith(("/", "\\")) or path.is_dir() or path.suffix == ""
+    if looks_like_directory:
+        path = path / DEFAULT_DB_FILENAME
+    return path
 
 
 def connect_db(db_path: str) -> sqlite3.Connection:
@@ -737,7 +741,7 @@ def cmd_init_db(args: argparse.Namespace) -> int:
     with connect_db(args.db) as conn:
         init_db(conn)
         conn.commit()
-    print(f"FT_INIT_OK path={args.db}")
+    print(f"FT_INIT_OK path={resolve_db_path(args.db)}")
     return 0
 
 

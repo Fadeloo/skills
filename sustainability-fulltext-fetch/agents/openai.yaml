@@ -1,4 +1,4 @@
 interface:
   display_name: "Sustainability Fulltext Fetch"
   short_description: "API-first DOI enrichment with webpage fallback"
-  default_prompt: "Use $sustainability-fulltext-fetch to enrich relevant DOI rows in shared SQLite by calling OpenAlex first, Semantic Scholar fallback, then webpage fulltext fallback with retry-safe persistence."
+  default_prompt: "Use $sustainability-fulltext-fetch to read relevant DOI rows from RSS DB, then enrich and persist content in a separate fulltext DB via OpenAlex first, Semantic Scholar fallback, then webpage fallback."

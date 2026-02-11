@@ -1,8 +1,8 @@
 # Schema and State Model
 
-## Required Upstream Table
+## Required Upstream Table (RSS DB)
 
-This skill expects the DOI-keyed `entries` table from `sustainability-rss-fetch` in the same SQLite database.
+This skill reads the DOI-keyed `entries` table from `sustainability-rss-fetch` in the RSS metadata DB.
 
 Required columns:
 - `doi`
@@ -12,11 +12,11 @@ Required columns:
 - `url`
 - `title`
 
-## Companion Table: `entry_content`
+## Companion Table: `entry_content` (Fulltext DB)
 
 One row per DOI (`doi` is primary key).
 
-- `doi`: FK to `entries.doi`.
+- `doi`: DOI key aligned with RSS `entries.doi` (no cross-DB FK).
 - `source_url`: URL used for fetch (`https://doi.org/<doi>` for API mode, canonical/raw URL for web mode).
 - `final_url`: final URL after redirects (web mode).
 - `http_status`: response status when available.

@@ -15,8 +15,10 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DB_FILENAME = "sustainability_rss.db"
-DEFAULT_DB_PATH = os.environ.get("SUSTAIN_RSS_DB_PATH", DEFAULT_DB_FILENAME)
+DEFAULT_RSS_DB_FILENAME = "sustainability_rss.db"
+DEFAULT_CONTENT_DB_FILENAME = "sustainability_fulltext.db"
+DEFAULT_RSS_DB_PATH = os.environ.get("SUSTAIN_RSS_DB_PATH", DEFAULT_RSS_DB_FILENAME)
+DEFAULT_CONTENT_DB_PATH = os.environ.get("SUSTAIN_FULLTEXT_DB_PATH", DEFAULT_CONTENT_DB_FILENAME)
 DEFAULT_MAX_RECORDS = 80
 DEFAULT_MAX_PER_FEED = 0
 DEFAULT_FULLTEXT_CHARS = 8192
@@ -158,12 +160,16 @@ def normalize_space(value: str) -> str:
     return " ".join(value.split())
 
 
-def resolve_db_path(db_path: str) -> Path:
+def resolve_db_path(db_path: str, default_path: str, default_filename: str) -> Path:
     raw = str(db_path or "").strip()
     if not raw:
-        raw = DEFAULT_DB_PATH
+        raw = default_path
 
-    return Path(raw).expanduser()
+    path = Path(raw).expanduser()
+    looks_like_directory = raw.endswith(("/", "\\")) or path.is_dir() or path.suffix == ""
+    if looks_like_directory:
+        path = path / default_filename
+    return path
 
 
 def truncate_text(value: str, max_chars: int) -> str:
@@ -283,8 +289,8 @@ def parse_fields(raw_fields: str | None) -> list[str]:
     return fields
 
 
-def connect_db(db_path: str) -> sqlite3.Connection:
-    db_file = resolve_db_path(db_path)
+def connect_db(db_path: str, default_path: str, default_filename: str) -> sqlite3.Connection:
+    db_file = resolve_db_path(db_path, default_path=default_path, default_filename=default_filename)
     if db_file.parent and str(db_file.parent) not in ("", "."):
         db_file.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_file))
@@ -295,18 +301,45 @@ def connect_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+def ensure_distinct_db_paths(rss_db_path: str, content_db_path: str) -> None:
+    rss_file = resolve_db_path(
+        rss_db_path,
+        default_path=DEFAULT_RSS_DB_PATH,
+        default_filename=DEFAULT_RSS_DB_FILENAME,
+    )
+    content_file = resolve_db_path(
+        content_db_path,
+        default_path=DEFAULT_CONTENT_DB_PATH,
+        default_filename=DEFAULT_CONTENT_DB_FILENAME,
+    )
+    if rss_file.resolve() == content_file.resolve():
+        raise ValueError("db_paths_must_be_distinct")
+
+
+def attach_content_db(conn: sqlite3.Connection, content_db_path: str) -> bool:
+    content_file = resolve_db_path(
+        content_db_path,
+        default_path=DEFAULT_CONTENT_DB_PATH,
+        default_filename=DEFAULT_CONTENT_DB_FILENAME,
+    )
+    if not content_file.exists():
+        return False
+    conn.execute("ATTACH DATABASE ? AS content", (str(content_file),))
+    return True
+
+
+def table_exists(conn: sqlite3.Connection, table_name: str, schema: str = "main") -> bool:
     row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
         (table_name,),
     ).fetchone()
     return bool(row)
 
 
-def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    if not table_exists(conn, table_name):
+def table_columns(conn: sqlite3.Connection, table_name: str, schema: str = "main") -> set[str]:
+    if not table_exists(conn, table_name, schema=schema):
         return set()
-    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    rows = conn.execute(f"PRAGMA {schema}.table_info({table_name})").fetchall()
     return {str(row["name"]) for row in rows}
 
 
@@ -361,9 +394,8 @@ def load_rows(
     start_utc_iso: str,
     end_utc_iso: str,
     limit: int,
+    has_entry_content: bool,
 ) -> tuple[list[sqlite3.Row], bool]:
-    has_entry_content = table_exists(conn, "entry_content")
-
     content_columns = (
         "COALESCE(ec.status, 'none') AS fulltext_status, "
         "COALESCE(ec.content_length, 0) AS fulltext_length, "
@@ -375,7 +407,7 @@ def load_rows(
             "'' AS fulltext_text"
         )
     )
-    join_clause = "LEFT JOIN entry_content ec ON ec.doi = e.doi" if has_entry_content else ""
+    join_clause = "LEFT JOIN content.entry_content ec ON ec.doi = e.doi" if has_entry_content else ""
 
     sql = f"""
     SELECT
@@ -573,6 +605,7 @@ def emit_output(payload: dict[str, Any], output_path: str | None, pretty: bool) 
 
 def run(args: argparse.Namespace) -> int:
     fields = parse_fields(args.fields)
+    ensure_distinct_db_paths(args.rss_db, args.content_db)
     start, end, period_label = determine_range(
         period=args.period,
         anchor_date=args.date,
@@ -580,7 +613,11 @@ def run(args: argparse.Namespace) -> int:
         custom_end=args.end,
     )
 
-    with connect_db(args.db) as conn:
+    with connect_db(
+        args.rss_db,
+        default_path=DEFAULT_RSS_DB_PATH,
+        default_filename=DEFAULT_RSS_DB_FILENAME,
+    ) as conn:
         if not ensure_required_tables(conn):
             print(
                 "SUMMARY_ERR reason=missing_tables detail='feeds/entries with doi not found. "
@@ -589,6 +626,8 @@ def run(args: argparse.Namespace) -> int:
             )
             return 2
 
+        attached_content = attach_content_db(conn, args.content_db)
+        has_entry_content = attached_content and table_exists(conn, "entry_content", schema="content")
         start_utc_iso = start.isoformat().replace("+00:00", "Z")
         end_utc_iso = end.isoformat().replace("+00:00", "Z")
         total_in_range = count_rows_in_range(conn, start_utc_iso=start_utc_iso, end_utc_iso=end_utc_iso)
@@ -601,6 +640,7 @@ def run(args: argparse.Namespace) -> int:
             start_utc_iso=start_utc_iso,
             end_utc_iso=end_utc_iso,
             limit=fetch_limit,
+            has_entry_content=has_entry_content,
         )
 
     records_raw: list[dict[str, Any]] = []
@@ -641,7 +681,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Retrieve time-windowed relevant RSS records for agent-side RAG summarization.",
     )
-    parser.add_argument("--db", default=DEFAULT_DB_PATH, help=f"SQLite db path (default: {DEFAULT_DB_PATH})")
+    parser.add_argument(
+        "--rss-db",
+        default=DEFAULT_RSS_DB_PATH,
+        help=f"RSS metadata db path (default: {DEFAULT_RSS_DB_PATH}; env: SUSTAIN_RSS_DB_PATH)",
+    )
+    parser.add_argument(
+        "--content-db",
+        default=DEFAULT_CONTENT_DB_PATH,
+        help=(
+            "Fulltext SQLite db path "
+            f"(default: {DEFAULT_CONTENT_DB_PATH}; env: SUSTAIN_FULLTEXT_DB_PATH)"
+        ),
+    )
     parser.add_argument(
         "--period",
         choices=["daily", "weekly", "monthly", "custom"],
@@ -696,7 +748,15 @@ def main() -> int:
         print(f"SUMMARY_ERR reason=sqlite_error detail={exc}", file=sys.stderr)
         return 1
     except ValueError as exc:
-        print(f"SUMMARY_ERR reason=value_error detail={exc}", file=sys.stderr)
+        reason = str(exc)
+        if reason == "db_paths_must_be_distinct":
+            print(
+                "SUMMARY_ERR reason=db_paths_must_be_distinct "
+                "detail='RSS DB and fulltext DB must be different files.'",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"SUMMARY_ERR reason=value_error detail={reason}", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"SUMMARY_ERR reason=unexpected detail={exc}", file=sys.stderr)

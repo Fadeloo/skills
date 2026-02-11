@@ -25,8 +25,10 @@ except ImportError:
     trafilatura = None
 
 
-DEFAULT_DB_FILENAME = "sustainability_rss.db"
-DEFAULT_DB_PATH = os.environ.get("SUSTAIN_RSS_DB_PATH", DEFAULT_DB_FILENAME)
+DEFAULT_RSS_DB_FILENAME = "sustainability_rss.db"
+DEFAULT_CONTENT_DB_FILENAME = "sustainability_fulltext.db"
+DEFAULT_RSS_DB_PATH = os.environ.get("SUSTAIN_RSS_DB_PATH", DEFAULT_RSS_DB_FILENAME)
+DEFAULT_CONTENT_DB_PATH = os.environ.get("SUSTAIN_FULLTEXT_DB_PATH", DEFAULT_CONTENT_DB_FILENAME)
 DEFAULT_USER_AGENT = "sustainability-fulltext-fetch/1.0 (+https://github.com/tiangong-ai/skills)"
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_MINUTES = 30
@@ -61,8 +63,7 @@ CREATE TABLE IF NOT EXISTS entry_content (
     next_retry_at TEXT,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY(doi) REFERENCES entries(doi) ON DELETE CASCADE
+    updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_entry_content_status ON entry_content(status);
@@ -287,16 +288,20 @@ def clean_text(value: str) -> str:
     return normalized.strip()
 
 
-def resolve_db_path(db_path: str) -> Path:
+def resolve_db_path(db_path: str, default_path: str, default_filename: str) -> Path:
     raw = str(db_path or "").strip()
     if not raw:
-        raw = DEFAULT_DB_PATH
+        raw = default_path
 
-    return Path(raw).expanduser()
+    path = Path(raw).expanduser()
+    looks_like_directory = raw.endswith(("/", "\\")) or path.is_dir() or path.suffix == ""
+    if looks_like_directory:
+        path = path / default_filename
+    return path
 
 
-def connect_db(db_path: str) -> sqlite3.Connection:
-    db_file = resolve_db_path(db_path)
+def connect_db(db_path: str, default_path: str, default_filename: str) -> sqlite3.Connection:
+    db_file = resolve_db_path(db_path, default_path=default_path, default_filename=default_filename)
     if db_file.parent and str(db_file.parent) not in ("", "."):
         db_file.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_file))
@@ -307,25 +312,55 @@ def connect_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+def ensure_distinct_db_paths(rss_db_path: str, content_db_path: str) -> tuple[Path, Path]:
+    rss_file = resolve_db_path(
+        rss_db_path,
+        default_path=DEFAULT_RSS_DB_PATH,
+        default_filename=DEFAULT_RSS_DB_FILENAME,
+    )
+    content_file = resolve_db_path(
+        content_db_path,
+        default_path=DEFAULT_CONTENT_DB_PATH,
+        default_filename=DEFAULT_CONTENT_DB_FILENAME,
+    )
+    if rss_file.resolve() == content_file.resolve():
+        raise ValueError("db_paths_must_be_distinct")
+    return rss_file, content_file
+
+
+def attach_rss_db(conn: sqlite3.Connection, rss_db_path: str, required: bool) -> bool:
+    rss_file = resolve_db_path(
+        rss_db_path,
+        default_path=DEFAULT_RSS_DB_PATH,
+        default_filename=DEFAULT_RSS_DB_FILENAME,
+    )
+    if not rss_file.exists():
+        if required:
+            raise ValueError("rss_db_missing")
+        return False
+    conn.execute("ATTACH DATABASE ? AS rss", (str(rss_file),))
+    return True
+
+
+def table_exists(conn: sqlite3.Connection, table_name: str, schema: str = "main") -> bool:
     row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
         (table_name,),
     ).fetchone()
     return bool(row)
 
 
-def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    if not table_exists(conn, table_name):
+def table_columns(conn: sqlite3.Connection, table_name: str, schema: str = "main") -> set[str]:
+    if not table_exists(conn, table_name, schema=schema):
         return set()
-    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    rows = conn.execute(f"PRAGMA {schema}.table_info({table_name})").fetchall()
     return {str(row["name"]) for row in rows}
 
 
-def ensure_entries_table(conn: sqlite3.Connection) -> None:
-    if not table_exists(conn, "entries"):
+def ensure_rss_entries_table(conn: sqlite3.Connection) -> None:
+    if not table_exists(conn, "entries", schema="rss"):
         raise ValueError("entries_table_missing")
-    columns = table_columns(conn, "entries")
+    columns = table_columns(conn, "entries", schema="rss")
     required = {"doi", "is_relevant", "doi_is_surrogate"}
     if not required.issubset(columns):
         raise ValueError("entries_table_missing_doi")
@@ -425,7 +460,6 @@ def migrate_legacy_entry_content_if_needed(conn: sqlite3.Connection) -> None:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    ensure_entries_table(conn)
     migrate_legacy_entry_content_if_needed(conn)
     conn.executescript(SCHEMA_SQL)
     columns = table_columns(conn, "entry_content")
@@ -843,7 +877,7 @@ def list_candidate_entries(
             e.title,
             e.canonical_url,
             e.url
-        FROM entries e
+        FROM rss.entries e
         LEFT JOIN entry_content ec ON ec.doi = e.doi
         WHERE e.is_relevant = 1
           AND {ENTRY_ELIGIBILITY_SQL_EXPR}
@@ -864,7 +898,7 @@ def list_candidate_entries(
             e.canonical_url,
             e.url
         FROM entry_content ec
-        JOIN entries e ON e.doi = ec.doi
+        JOIN rss.entries e ON e.doi = ec.doi
         WHERE ec.status = 'failed'
           AND ec.next_retry_at IS NULL
           AND {retry_clause}
@@ -884,7 +918,7 @@ def list_candidate_entries(
             e.canonical_url,
             e.url
         FROM entry_content ec
-        JOIN entries e ON e.doi = ec.doi
+        JOIN rss.entries e ON e.doi = ec.doi
         WHERE ec.status = 'failed'
           AND ec.next_retry_at <= ?
           AND {retry_clause}
@@ -903,7 +937,7 @@ def list_candidate_entries(
             e.canonical_url,
             e.url
         FROM entry_content ec
-        JOIN entries e ON e.doi = ec.doi
+        JOIN rss.entries e ON e.doi = ec.doi
         WHERE ec.status = 'ready'
           AND ec.fetched_at < ?
           AND e.is_relevant = 1
@@ -919,7 +953,7 @@ def list_candidate_entries(
             e.title,
             e.canonical_url,
             e.url
-        FROM entries e
+        FROM rss.entries e
         LEFT JOIN entry_content ec ON ec.doi = e.doi
         WHERE e.is_relevant = 1
           AND {ENTRY_ELIGIBILITY_SQL_EXPR}
@@ -960,7 +994,7 @@ def list_candidate_entries(
             e.title,
             e.canonical_url,
             e.url
-        FROM entries e
+        FROM rss.entries e
         WHERE e.is_relevant = 1
           AND {ENTRY_ELIGIBILITY_SQL_EXPR}
         ORDER BY {EVENT_TS_SQL_EXPR} DESC, e.doi DESC
@@ -1197,21 +1231,35 @@ def resolve_s2_api_key(value: str | None) -> str | None:
 
 
 def cmd_init_db(args: argparse.Namespace) -> int:
-    with connect_db(args.db) as conn:
+    with connect_db(
+        args.content_db,
+        default_path=DEFAULT_CONTENT_DB_PATH,
+        default_filename=DEFAULT_CONTENT_DB_FILENAME,
+    ) as conn:
         init_db(conn)
         conn.commit()
-    print(f"FT_INIT_OK path={args.db}")
+    print(
+        "FT_INIT_OK "
+        f"content_db={resolve_db_path(args.content_db, DEFAULT_CONTENT_DB_PATH, DEFAULT_CONTENT_DB_FILENAME)}"
+    )
     return 0
 
 
 def cmd_fetch_entry(args: argparse.Namespace) -> int:
     validate_retry_args(args)
-    with connect_db(args.db) as conn:
+    ensure_distinct_db_paths(args.rss_db, args.content_db)
+    with connect_db(
+        args.content_db,
+        default_path=DEFAULT_CONTENT_DB_PATH,
+        default_filename=DEFAULT_CONTENT_DB_FILENAME,
+    ) as conn:
         init_db(conn)
+        attach_rss_db(conn, args.rss_db, required=True)
+        ensure_rss_entries_table(conn)
         row = conn.execute(
             """
             SELECT doi, title, canonical_url, url, doi_is_surrogate, is_relevant
-            FROM entries
+            FROM rss.entries
             WHERE doi = ?
             """,
             (normalize_space(args.doi),),
@@ -1243,6 +1291,7 @@ def cmd_fetch_entry(args: argparse.Namespace) -> int:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     validate_retry_args(args)
+    ensure_distinct_db_paths(args.rss_db, args.content_db)
     totals = {
         "checked": 0,
         "ready_new": 0,
@@ -1253,8 +1302,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
         "failed_updated": 0,
     }
 
-    with connect_db(args.db) as conn:
+    with connect_db(
+        args.content_db,
+        default_path=DEFAULT_CONTENT_DB_PATH,
+        default_filename=DEFAULT_CONTENT_DB_FILENAME,
+    ) as conn:
         init_db(conn)
+        attach_rss_db(conn, args.rss_db, required=True)
+        ensure_rss_entries_table(conn)
         rows = list_candidate_entries(
             conn=conn,
             limit=args.limit,
@@ -1298,8 +1353,17 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 
 def cmd_list_content(args: argparse.Namespace) -> int:
-    with connect_db(args.db) as conn:
+    ensure_distinct_db_paths(args.rss_db, args.content_db)
+    with connect_db(
+        args.content_db,
+        default_path=DEFAULT_CONTENT_DB_PATH,
+        default_filename=DEFAULT_CONTENT_DB_FILENAME,
+    ) as conn:
         init_db(conn)
+        attached_rss = attach_rss_db(conn, args.rss_db, required=False)
+        has_rss_entries = attached_rss and table_exists(conn, "entries", schema="rss")
+        join_clause = "LEFT JOIN rss.entries e ON e.doi = ec.doi" if has_rss_entries else ""
+        title_column = "e.title" if has_rss_entries else "NULL AS title"
         sql = """
         SELECT
             ec.doi,
@@ -1313,9 +1377,9 @@ def cmd_list_content(args: argparse.Namespace) -> int:
             ec.fetched_at,
             COALESCE(ec.final_url, ec.source_url) AS url,
             ec.last_error,
-            e.title
+            """ + title_column + """
         FROM entry_content ec
-        LEFT JOIN entries e ON e.doi = ec.doi
+        """ + join_clause + """
         """
         params: list[Any] = []
         if args.status != "all":
@@ -1346,11 +1410,30 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     parser_init = subparsers.add_parser("init-db", help="Create entry_content table.")
-    parser_init.add_argument("--db", default=DEFAULT_DB_PATH, help=f"SQLite db path (default: {DEFAULT_DB_PATH})")
+    parser_init.add_argument(
+        "--content-db",
+        default=DEFAULT_CONTENT_DB_PATH,
+        help=(
+            "Fulltext SQLite db path "
+            f"(default: {DEFAULT_CONTENT_DB_PATH}; env: SUSTAIN_FULLTEXT_DB_PATH)"
+        ),
+    )
     parser_init.set_defaults(func=cmd_init_db)
 
     parser_sync = subparsers.add_parser("sync", help="Fetch content for pending relevant entries.")
-    parser_sync.add_argument("--db", default=DEFAULT_DB_PATH, help=f"SQLite db path (default: {DEFAULT_DB_PATH})")
+    parser_sync.add_argument(
+        "--rss-db",
+        default=DEFAULT_RSS_DB_PATH,
+        help=f"RSS metadata db path (default: {DEFAULT_RSS_DB_PATH}; env: SUSTAIN_RSS_DB_PATH)",
+    )
+    parser_sync.add_argument(
+        "--content-db",
+        default=DEFAULT_CONTENT_DB_PATH,
+        help=(
+            "Fulltext SQLite db path "
+            f"(default: {DEFAULT_CONTENT_DB_PATH}; env: SUSTAIN_FULLTEXT_DB_PATH)"
+        ),
+    )
     parser_sync.add_argument("--limit", type=int, default=50, help="Max entries per run. 0 means no limit.")
     parser_sync.add_argument("--force", action="store_true", help="Refetch entries even when status is ready.")
     parser_sync.add_argument("--only-failed", action="store_true", help="Fetch only rows currently marked failed.")
@@ -1428,7 +1511,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser_sync.set_defaults(func=cmd_sync)
 
     parser_fetch_entry = subparsers.add_parser("fetch-entry", help="Fetch one entry by DOI.")
-    parser_fetch_entry.add_argument("--db", default=DEFAULT_DB_PATH, help=f"SQLite db path (default: {DEFAULT_DB_PATH})")
+    parser_fetch_entry.add_argument(
+        "--rss-db",
+        default=DEFAULT_RSS_DB_PATH,
+        help=f"RSS metadata db path (default: {DEFAULT_RSS_DB_PATH}; env: SUSTAIN_RSS_DB_PATH)",
+    )
+    parser_fetch_entry.add_argument(
+        "--content-db",
+        default=DEFAULT_CONTENT_DB_PATH,
+        help=(
+            "Fulltext SQLite db path "
+            f"(default: {DEFAULT_CONTENT_DB_PATH}; env: SUSTAIN_FULLTEXT_DB_PATH)"
+        ),
+    )
     parser_fetch_entry.add_argument("--doi", required=True, help="DOI value from entries table.")
     parser_fetch_entry.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds for webpage fallback.")
     parser_fetch_entry.add_argument("--max-bytes", type=int, default=2_000_000, help="Max bytes to read per webpage response.")
@@ -1488,7 +1583,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser_fetch_entry.set_defaults(func=cmd_fetch_entry)
 
     parser_list = subparsers.add_parser("list-content", help="List stored content rows.")
-    parser_list.add_argument("--db", default=DEFAULT_DB_PATH, help=f"SQLite db path (default: {DEFAULT_DB_PATH})")
+    parser_list.add_argument(
+        "--rss-db",
+        default=DEFAULT_RSS_DB_PATH,
+        help=f"RSS metadata db path (default: {DEFAULT_RSS_DB_PATH}; env: SUSTAIN_RSS_DB_PATH)",
+    )
+    parser_list.add_argument(
+        "--content-db",
+        default=DEFAULT_CONTENT_DB_PATH,
+        help=(
+            "Fulltext SQLite db path "
+            f"(default: {DEFAULT_CONTENT_DB_PATH}; env: SUSTAIN_FULLTEXT_DB_PATH)"
+        ),
+    )
     parser_list.add_argument("--status", choices=["all", "ready", "failed"], default="all", help="Status filter.")
     parser_list.add_argument("--limit", type=int, default=100, help="Max rows to print.")
     parser_list.set_defaults(func=cmd_list_content)
@@ -1514,6 +1621,20 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
+        if reason == "rss_db_missing":
+            print(
+                "FULLTEXT_ERR reason=rss_db_missing "
+                "detail='RSS DB file not found. Set --rss-db or SUSTAIN_RSS_DB_PATH correctly.'",
+                file=sys.stderr,
+            )
+            return 2
+        if reason == "db_paths_must_be_distinct":
+            print(
+                "FULLTEXT_ERR reason=db_paths_must_be_distinct "
+                "detail='RSS DB and fulltext DB must be different files.'",
+                file=sys.stderr,
+            )
+            return 1
         if reason == "invalid_max_retries":
             print(
                 "FULLTEXT_ERR reason=invalid_max_retries detail='--max-retries must be >= 0.'",

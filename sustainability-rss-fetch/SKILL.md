@@ -1,6 +1,6 @@
 ---
 name: sustainability-rss-fetch
-description: Ingest all sustainability journal RSS entries into a shared SQLite database first, keyed by DOI, then mark relevance and prune non-relevant rows to DOI-only. Use when building a DOI-first ingestion pipeline with mandatory full ingestion before topic filtering.
+description: Ingest all sustainability journal RSS entries into a dedicated RSS SQLite database first, keyed by DOI, then mark relevance and prune non-relevant rows to DOI-only. Use when building a DOI-first ingestion pipeline with mandatory full ingestion before topic filtering.
 ---
 
 # Sustainability RSS Fetch
@@ -8,7 +8,7 @@ description: Ingest all sustainability journal RSS entries into a shared SQLite 
 ## Core Goal
 - Ingest all RSS/Atom items into SQLite before topic filtering.
 - Use `doi` as the primary key in `entries`.
-- Keep one shared DB for downstream fulltext and summary skills.
+- Keep RSS metadata isolated in its own DB file.
 - After semantic screening, keep relevant rows and prune non-relevant rows to DOI-only.
 
 ## Triggering Conditions
@@ -18,7 +18,7 @@ description: Ingest all sustainability journal RSS entries into a shared SQLite 
 - Need stable DOI-keyed storage for downstream API/fulltext/summarization.
 
 ## Mandatory Workflow
-1. Prepare runtime and shared DB path.
+1. Prepare runtime and RSS metadata DB path.
 
 ```bash
 python3 -m pip install feedparser
