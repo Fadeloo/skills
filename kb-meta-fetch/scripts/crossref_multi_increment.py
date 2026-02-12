@@ -207,6 +207,7 @@ def main():
         "INSERT INTO journals (title, doi, journal, authors, date) "
         "VALUES %s ON CONFLICT (doi) DO NOTHING"
     )
+    total_inserted = 0
 
     for _, issn_row in df_issn.iterrows():
         papers = fetch_journal_data(
@@ -243,9 +244,14 @@ def main():
             psycopg2.extras.execute_values(
                 cur, insert_query, data_to_insert, template=None, page_size=1000
             )
+            inserted_count = max(cur.rowcount, 0)
 
-        logging.info("Inserted %s papers for %s", len(data_to_insert), issn_row["journal"])
+        total_inserted += inserted_count
+        logging.info("Inserted %s papers for %s", inserted_count, issn_row["journal"])
         conn_pg.commit()
+
+    time_range_end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    logging.info("此次更新%s条，时间范围是%s 至 %s", total_inserted, args.from_date, time_range_end)
 
     conn_pg.close()
 
