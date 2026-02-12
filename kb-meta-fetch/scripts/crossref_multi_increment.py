@@ -3,7 +3,6 @@
 
 import argparse
 import html
-import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -32,6 +31,7 @@ def configure_logging():
 
     logging.basicConfig(
         filename=str(log_path),
+        filemode="w",
         level=logging.INFO,
         format="%(asctime)s:%(levelname)s:%(message)s",
         force=True,
@@ -97,14 +97,18 @@ def create_dataframe(papers, journal_title):
         title = paper.get("title", [""])[0]
         doi = paper.get("DOI", "")
         journal = journal_title.upper()
-        authors = json.dumps(
-            [
-                author.get("given", "") + " " + author.get("family", "")
-                for author in paper.get("author", [])
-            ]
-        )
-        if authors == "[]":
-            authors = None
+        raw_authors = paper.get("author") or []
+        if not isinstance(raw_authors, list):
+            raw_authors = []
+        authors = [
+            f"{author.get('given', '').strip()} {author.get('family', '').strip()}".strip()
+            for author in raw_authors
+            if isinstance(author, dict)
+        ]
+        authors = [author for author in authors if author]
+        if not authors:
+            # Skip papers that have no valid author names.
+            continue
         issued = paper.get("issued", {})
         date_parts = issued.get("date-parts", [[None]])
         if len(date_parts[0]) == 1 and date_parts[0][0] is not None:
@@ -218,21 +222,29 @@ def main():
             continue
 
         with conn_pg.cursor() as cur:
-            data_to_insert = [
-                (
-                    paper_row["title"],
-                    paper_row["doi"],
-                    paper_row["journal"],
-                    paper_row["authors"],
-                    paper_row["date"],
+            data_to_insert = []
+            for _, paper_row in df.iterrows():
+                authors = paper_row["authors"]
+                if authors is None or (isinstance(authors, float) and pd.isna(authors)):
+                    continue
+                data_to_insert.append(
+                    (
+                        paper_row["title"],
+                        paper_row["doi"],
+                        paper_row["journal"],
+                        psycopg2.extras.Json(authors),
+                        paper_row["date"],
+                    )
                 )
-                for _, paper_row in df.iterrows()
-            ]
+
+            if not data_to_insert:
+                logging.info("No insertable papers (all missing authors) for %s", issn_row["journal"])
+                continue
             psycopg2.extras.execute_values(
                 cur, insert_query, data_to_insert, template=None, page_size=1000
             )
 
-        logging.info("Found %s papers for %s", len(df), issn_row["journal"])
+        logging.info("Inserted %s papers for %s", len(data_to_insert), issn_row["journal"])
         conn_pg.commit()
 
     conn_pg.close()
